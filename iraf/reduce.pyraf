@@ -1,0 +1,244 @@
+#############################################################################
+#  PyRAF/Unix reduction steps for 
+#
+# ~/.iraf/loginuser.cl is expected to be loaded.
+#~/.iraf/pyraflogin3.py should be supported.
+#
+# Python 3.12 is expected to be loaded and a virtual environment.
+#
+#   sudo apt update && sudo apt upgrade -y
+#   sudo add-apt-repository ppa:deadsnakes/ppa -y
+#   sudo apt update
+#   sudo apt install python3.12 -y
+#   python3.12 --version                                  # confirm
+#   sudo apt install python3.12-venv python3.12-dev -y
+#
+#   mkdir -p $HOME/envs
+#   cd $HOME/envs
+#   python3.12 -m venv pyraf        # make the pyraf venv
+#
+#
+# $HOME/envs/pyraf/bin/activate
+# and python packates listed in requirements.txt installed in the venv.
+#
+# The testing of this container has been done using a Docker Container, together
+# with a Docker Compose environment. The files are in this git clone,
+# at FS1ReductionTutorial/Docker.
+#
+#############################################################################
+# HEREHEREHERE
+
+# /usr/lib/iraf/noao/lib/onedstds/bstdscal/hr7001.dat is vega.
+
+import sys
+import os
+
+HOME     = os.getenv('HOME')
+UNIXPATH = os.getenv('PATH')
+
+# add our venv requirements to their the main mix of packages.
+# NOTE running in a docker with homedir of root.
+sys.path.append(HOME+'/root/bin')
+sys.path.append(HOME+'/pyraf/lib/python3.12/site-packages')
+
+import numpy as np
+from pyraflogin3 import *               # Get my routines in memory
+
+try:
+    from pyraflogin3 import *
+except:
+    print("""Statement: "from from pyraflogin3 import *", failed.""")
+
+# Remove burden of all those swithces for hedit.nhedit
+iraf.hedit.add       = iraf.yes                           # nail in hedit options
+iraf.hedit.addonly   = iraf.no                            # we want
+iraf.hedit.delete    = iraf.no
+iraf.hedit.verify    = iraf.no
+iraf.hedit.show      = iraf.no
+iraf.hedit.update    = iraf.yes
+
+iraf.nhedit.comment  = "FlexSpec1"   # default for this?
+iraf.nhedit.add      = iraf.yes     
+iraf.nhedit.addonly  = iraf.no                            # we want
+iraf.nhedit.show     = iraf.no  
+iraf.nhedit.verify   = iraf.no  
+iraf.nhedit.delete   = iraf.no  
+iraf.nhedit.update   = iraf.yes     
+
+##############################################################################
+# Fix names: replace +/- with p/m. Keeps filenames from being mistaken for maths
+# Replace one or more spaces with single underscore. Makes names unix compatable
+# change extension from .fit to .fits.
+##############################################################################
+!cp -pr ../RawData/*.{fit,fits} .                         # Grab the files to process
+!fixnames *fit *fits                                      # fix their names...
+
+# update all the headers.
+!ls -1 *fits > l.l
+cat l.l
+cl < ../usw/fs900.cl                                      # all the headers
+
+# take a hack at getting the targets, ignore focus, cals, zeros, flats, darks.
+#!ls -1 *fits | sed -e 's/_[0-9]\+s.*$//' | grep -vi '\(cal\|zero\|dark\|flat\|focus\)' | sort | uniq > targets.txt
+
+ll *fits 
+cat l.l
+hedit @l.l      IMAGETYP object add+ update+ del- ver- show-
+hedit Zero*fits IMAGETYP zero   add+ update+ del- ver- show-
+
+!ls -1 Zero*fits > l.l
+!rm -f zeromaster.fits   # the -f doesn't fail if the file is already missing.
+zerocombine @l.l zeromaster.fits output = z_@l.l combine=median reject=sigclip scale=none 
+
+!mkdir -p attic
+!mv Z*fits attic                                          # Move these out of the way
+
+# make list to apall traces from
+!ls -1 z_*fits | grep -vi "\(flat\|cal\|ref\|test\|focus\)" | grep _R > l.l
+cat l.l
+
+# python var = middle of the l.l list
+reffile = apallinteractive('l.l')                                   # Figure out the middle one
+
+
+##############################################################################
+# Preliminary things to do:
+# ) Add a serial number to all files, ordered by DATEOBS to guratentee unique
+#   names. This prevents fixnames from creating a duplicate.
+# ) Fix the filenames, remove spaces, change +/- to underscore.
+# ) Use hedit *fits DISPAXIS 1 add+ update+ del- ver- show-
+# ) Update all the headers with the site, telescope, spectrograph and fix
+#   The use of gain keyword.
+# ) Trim all the files.
+# ) Create the zeromaster.fits file
+# ) Subtract the zeromaster from all but *Zero* files.
+# ) Create any flatmasters needed.
+# ) Aperture extract all the spectra -- make sure the uparams are right.
+#
+# ) At this point, reductions are more in order.
+#
+##############################################################################
+
+!ls -1 *fits > l.l
+! fitserial @l.l               # external python script.
+
+# Pick one flat, open in ds9, and determine the trim parameters. The flat defines
+# the borders where s
+  
+##############################################################################
+# Me playing with getting the paths into both IRAF variables and 
+#  python variables.
+##############################################################################
+HOME=os.getenv('HOME')
+
+try:
+    if(os.path.exists(f"{HOME}/.iraf")):
+        print('loading pyraflogin3')
+        sys.path.insert(0, f"{HOME}/.iraf")
+        from pyraflogin3 import *
+except:
+    print("Unable to load pyraflogin3.py -- check the environment and startup.")
+
+
+
+# set  OBSROOT=INIT  # for IRAF commands
+# set  OBS=OBSROOT$/PreReduce/
+!printf "set OBSROOT=$(pwd)/..\n"           > setum.cl  # BASH trick
+!printf "set OBS=$(pwd)/../PreAnalysis\n"  >> setum.cl
+cl < setum.cl
+
+show OBSROOT                                              # check work
+show OBS
+
+# Use Python/PyRAF to set bash ENV variables for scripts etc. Tie PyRAF env to bash env.
+# Rough equivalent of export.
+os.environ['OBSROOT'] = iraf.osfn("OBSROOT$")             # share with external files
+os.environ['OBS']     = iraf.osfn("OBS$")
+
+OBSROOT               = os.getenv("OBSROOT")              # make some python variables
+OBS                   = os.getenv("OBS")
+print(f"OBSROOT={OBSROOT}\nOBS={OBS}")
+
+if( os.getenv('TRIMSEC') is None):
+    trimsec = '[1200:5400,1800:2500]'
+    os.environ.setdefault('TRIMSEC',trimsec)
+    TRIMSEC = os.getenv('TRIMSEC')
+
+print(f'TRIMSEC={trimsec}')
+
+# example of a oneliner to show file and the plot matching the trim parameters
+# Consider writing a small bash script ds9view that does it all.
+# !ds9 -fits t_a11060_HD153613_20s_004747m9.fits  -region load ../usw/FS150_Spectrum.reg
+
+chdir OBSROOT$                                                             # Use IRAF lingo to change dirs
+!shopt -s nullglob; cp $OBSROOT/RawData/*fit $OBSROOT/RawData/*fits   .    # reduce data
+!for f in *zip; do mkdir -p RawData/attic; mv "$f"  RawData/attic; done  # move pesky zip files out of way.
+
+chdir OBS$
+pwd
+
+##############################################################################
+# Fix the names. This uses a file in ~/bin to do it's trick.
+# If you use my loginuser.cl file; then ll is declared as a foreign task.
+# It is the equivalent of ls -1 with the outout to l.l.
+##############################################################################
+
+ll *fits *fit
+!fixnames $(cat l.l)
+ll *fits
+#!fitserial *fits
+cl < ../usw/fs900.cl            # fixed the headers
+
+hedit @l.l     IMAGETYP object add+ update+ ver- del- show-  # defaulted all files
+hedit Zer*fits IMAGETYP zero   add+ update+ ver- del- show-  # made compatable zerocomine
+
+!rm -rf zeromaster.fits         # always be safe!
+ll Z*fits
+zerocombine @l.l output=zeromaster.fits combine=median scale=none
+
+
+##############################################################################
+# Add the generic cruft to the headers. using cl and imputing the .cl file
+# to make any changes we can do things. Checkout the fs600.cl and fs900.cl.
+# you can make one with the observers, and anything else you may like.
+# One can use several; say a subset with just the site; the instrument; the team(s)
+# etc. For us: ~/Observations/Chile/usw can hold these files.
+##############################################################################
+! ls -1 *fits > l.l
+
+
+##############################################################################
+#                             TRIM THE FILES
+#
+##############################################################################
+ll a*fits
+!if [ "$TRIMSEC" != ' ' ] ; then trim -s $TRIMSEC $(cat l.l) ; fi  # trim makes t_//@l.l output!
+
+!trim @l.l -s "[1100:6250,1850:2600]"
+
+##############################################################################
+# Make zeromaster. Instead of calling it masterzero, masterdark, masterflat --
+#   put the type first and use the <TAB> (file completion!) using the
+#   ze<TAB>! 
+##############################################################################
+ls -1 t_*Zero* > l.l
+hedit @l.l IMAGETYP zero           # set the IMAGETYP to zero to soothe zerocombine
+!rm -f zeromaster.fits             # prevent two extensions!!!!!
+zerocombine @l.l output=zeromaster.fits combine=median scale=none
+
+##############################################################################
+# OK: Now zero correct everything else, but t_Zero files
+#  grep -v <pattern> shows every line but those matching <pattern>
+# make a lot of z_t_*files; zero subtracted.
+##############################################################################
+! ls -1 *fits | grep -v t_Zero | grep -v *master*fits > l.l
+imarith @l.l - zeromaster.fits z_@l.l
+
+##############################################################################
+# The next thing to do is to segregate the observations. We need to
+# match science images together with their cals and flats
+# the ref images together with their cals and flats
+##############################################################################
+
+
+
